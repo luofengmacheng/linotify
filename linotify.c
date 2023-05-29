@@ -40,9 +40,17 @@ struct inotify_context {
 
 void push_inotify_handle(lua_State *L, int fd)
 {
+    // 分配一块指定大小的内存块，把内存块的地址作为userdata压栈，并返回内存块的地址
     int *udata = (int *) lua_newuserdata(L, sizeof(int));
+
+    // 将fd保存到刚才申请的内存中
     *udata = fd;
+
+    // 通过名称找到元表，然后将元表入栈
     luaL_getmetatable(L, MT_NAME);
+
+    // 将栈顶的元表设置给-2对应的元素，也就是刚才的userdata
+    // 那么在lua脚本中的inotify_handle就有元表对应的行为
     lua_setmetatable(L, -2);
 }
 
@@ -51,6 +59,7 @@ int get_inotify_handle(lua_State *L, int index)
     return *((int *) luaL_checkudata(L, index, MT_NAME));
 }
 
+// 错误处理：将nil、错误信息、errno入栈，并返回3
 static int handle_error(lua_State *L)
 {
     lua_pushnil(L);
@@ -59,20 +68,28 @@ static int handle_error(lua_State *L)
     return 3;
 }
 
+// 当前模块的初始化函数，调用时会返回inotify_handle
 static int init(lua_State *L)
 {
     int fd;
     int flags = 0;
 
+    // init函数只有一个参数，该参数是个table，里面有一个成员blocking
     if(lua_type(L, 1) == LUA_TTABLE) {
+
+        // 将参数的table中的blocking字段值压栈
         lua_getfield(L, 1, "blocking");
 
+        // 如果blocking字段为false，则将flags加上非阻塞的标志
         if(lua_type(L, -1) != LUA_TNIL && !lua_toboolean(L, -1)) {
             flags |= IN_NONBLOCK;
         }
+
+        // 将刚才放到栈顶的blocking参数弹出
         lua_pop(L, 1);
     }
 
+    // 调用inotify_init1创建inotify的描述符
     if((fd = inotify_init1(flags)) == -1) {
         return handle_error(L);
     } else {
@@ -87,6 +104,7 @@ static int handle_fileno(lua_State *L)
     return 1;
 }
 
+// 创建事件的table并压栈
 static void
 push_inotify_event(lua_State *L, struct inotify_event *ev)
 {
@@ -107,6 +125,7 @@ push_inotify_event(lua_State *L, struct inotify_event *ev)
     }
 }
 
+// 读取事件
 static int handle_read(lua_State *L)
 {
     int fd;
@@ -129,6 +148,7 @@ static int handle_read(lua_State *L)
     while(bytes >= sizeof(struct inotify_event)) {
         iev = (struct inotify_event *) (buffer + i);
 
+        // 将一个事件压栈
         push_inotify_event(L, iev);
         lua_rawseti(L, -2, n++);
 
@@ -195,6 +215,7 @@ static int handle_close(lua_State *L)
     return 0;
 }
 
+// handle:addwatch(path, [event_masks...])
 static int handle_add_watch(lua_State *L)
 {
     int fd;
@@ -204,6 +225,7 @@ static int handle_add_watch(lua_State *L)
     const char *path;
     uint32_t mask = 0;
 
+    // 获取三个参数
     fd = get_inotify_handle(L, 1);
     path = luaL_checkstring(L, 2);
     top = lua_gettop(L);
@@ -211,6 +233,7 @@ static int handle_add_watch(lua_State *L)
         mask |= luaL_checkinteger(L, i);
     }
 
+    // 添加监听，然后返回wd
     if((wd = inotify_add_watch(fd, path, mask)) == -1) {
         return handle_error(L);
     } else {
@@ -219,14 +242,17 @@ static int handle_add_watch(lua_State *L)
     }
 }
 
+// handle:rmwatch(watchid)
 static int handle_rm_watch(lua_State *L)
 {
     int fd;
     int wd;
 
+    // 获取两个参数
     fd = get_inotify_handle(L, 1);
     wd = luaL_checkinteger(L, 2);
 
+    // 删除wd
     if(inotify_rm_watch(fd, wd) == -1) {
         return handle_error(L);
     }
@@ -259,29 +285,50 @@ static luaL_Reg handle_funcs[] = {
     lua_pushinteger(L, s);\
     lua_setfield(L, -2, #s);
 
+/*
+** so的入口函数
+*/
 int luaopen_inotify(lua_State *L)
 {
-    luaL_newmetatable(L, MT_NAME);
+    luaL_newmetatable(L, MT_NAME); // 在注册表中创建元表
+    // 创建一个新的table，并加入栈中，第2个参数是数组的长度，第3个参数是hash表的长度
+    // 所以，此处的table应该是个hash表
     lua_createtable(L, 0, sizeof(handle_funcs) / sizeof(luaL_Reg) - 1);
+    // 将所有的函数存储到table中
 #if LUA_VERSION_NUM > 501
     luaL_setfuncs(L, handle_funcs, 0);
 #else
     luaL_register(L, NULL, handle_funcs);
 #endif
+    // 将元表的__index指向handle_funcs所在的table，并将该table弹出
     lua_setfield(L, -2, "__index");
+
+    // 将handle_gc函数入栈
     lua_pushcfunction(L, handle__gc);
+
+    // 将元表的__gc指向handle_gc，并将handle_gc弹出
     lua_setfield(L, -2, "__gc");
+
+    // 将字符串入栈
     lua_pushliteral(L, "inotify_handle");
+
+    // 将元表的__type指向inotify_handle，并将inotify_handle弹出
     lua_setfield(L, -2, "__type");
+
+    // 将元表弹出
     lua_pop(L, 1);
 
+    // 创建table并入栈
     lua_newtable(L);
+
+    // 将inotify_funcs的函数保存到table中
 #if LUA_VERSION_NUM > 501
     luaL_setfuncs(L, inotify_funcs,0);
 #else
     luaL_register(L, NULL, inotify_funcs);
 #endif
 
+    // 将常量保存到table中
     register_constant(IN_ACCESS);
     register_constant(IN_ATTRIB);
     register_constant(IN_CLOSE_WRITE);
